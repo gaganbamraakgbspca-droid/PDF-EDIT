@@ -41,6 +41,10 @@ main{flex:1;overflow:auto;padding:22px 12px 60px;position:relative}
 .tool-text .ov,.tool-edit .ov,.tool-para .ov{cursor:text}
 textarea.tin{display:block}.tool-draw .ov,.tool-rect .ov,.tool-white .ov,.tool-hl .ov{cursor:crosshair}.tool-img .ov{cursor:copy}
 .tin{position:absolute;z-index:5;border:1px dashed var(--acc);background:#fff9;font-family:Helvetica,Arial,sans-serif;padding:0;outline:none;min-width:80px}
+[hidden]{display:none!important}
+#fp{position:fixed;right:12px;top:56px;width:min(400px,92vw);max-height:70vh;overflow:auto;background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:12px;z-index:20;box-shadow:0 10px 30px #0004}
+#fp .btn{border-color:var(--line);font-size:12px;padding:3px 8px;align-self:flex-start}
+.fr{border-top:1px solid var(--line);padding:8px 0;display:flex;flex-direction:column;gap:3px}.fr small{color:var(--mute)}
 #toast{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--bar);color:var(--bart);padding:8px 16px;border-radius:99px;opacity:0;transition:.25s;pointer-events:none}
 #toast.show{opacity:1}
 .hint{font-size:12px;color:var(--mute);text-align:center;margin-top:18px}
@@ -51,6 +55,7 @@ textarea.tin{display:block}.tool-draw .ov,.tool-rect .ov,.tool-white .ov,.tool-h
   <span class="logo">PDF<i>Edit</i></span>
   <div class="grp">
     <label class="btn" for="f">Open</label><input id="f" type="file" accept="application/pdf" hidden>
+    <button id="fontsBtn" title="Fonts found in this PDF">Fonts <span id="fcount">0</span></button>
     <button id="blank" disabled title="Add a blank page at the end">+ Page</button>
   </div>
   <div class="grp" id="tools">
@@ -82,10 +87,13 @@ textarea.tin{display:block}.tool-draw .ov,.tool-rect .ov,.tool-white .ov,.tool-h
     <div class="hint">…or drag one onto this window</div>
   </div>
 </main>
+<div id="fp" hidden><b>Fonts in this PDF</b>
+  <p class="hint" style="text-align:left;margin:4px 0 6px">Edited text uses the PDF’s own embedded font when it has the letters, else a matching web font. Upload the real .ttf/.otf to be exact.</p><div id="fl"></div></div>
 <div id="toast"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 const $=s=>document.querySelector(s), main=$('#main');
@@ -101,8 +109,8 @@ async function openFile(file){
   if(!file)return;
   try{
     srcBytes=new Uint8Array(await file.arrayBuffer());
-    pdfDoc=await pdfjsLib.getDocument({data:srcBytes.slice()}).promise;
-    pages=[];undoStack=[];
+    pdfDoc=await pdfjsLib.getDocument({data:srcBytes.slice(),fontExtraProperties:true}).promise;
+    pages=[];undoStack=[];for(const k in FONTS)delete FONTS[k];refreshFontUI();
     for(let i=1;i<=pdfDoc.numPages;i++){
       const v=(await pdfDoc.getPage(i)).getViewport({scale:1});
       pages.push({src:i,w:v.width,h:v.height,anns:[]});
@@ -207,6 +215,69 @@ function clampBox(p,b){
     if(v.x>x0-m&&v.x<x1+m){if(v.x<(x0+x1)/2)x0=Math.max(x0,v.x+m);else x1=Math.min(x1,v.x-m)}}
   return x1>x0&&y1>y0?{x0,y0,x1,y1}:b;
 }
+
+/* ---- font engine: real font names, embedded fonts, web matches, user uploads ---- */
+const FONTS={};let fontN=0;
+const ALIAS={arial:'Arimo',helvetica:'Arimo',timesnewroman:'Tinos',times:'Tinos',couriernew:'Cousine',courier:'Cousine',calibri:'Carlito',cambria:'Caladea',georgia:'Gelasio',segoeui:'Open Sans',tahoma:'Open Sans',verdana:'Open Sans'};
+/* remove hidden / private-use / control characters that PDFs hide inside text */
+const clean=t=>t.replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g,' ').replace(/[\u0000-\u001F\u007F-\u009F\u00AD\u200B-\u200F\u2028\u2029\u202A-\u202E\u2060-\u206F\uE000-\uF8FF\uFEFF\uFFF9-\uFFFF]/g,'');
+const cleanName=n=>(n||'').replace(/^[A-Z]{6}\+/,'');
+function famOf(n){const b=cleanName(n).split(/[-,]/)[0].replace(/(PSMT|MT|PS|Std|Pro)+$/,''),k=b.toLowerCase().replace(/[^a-z]/g,'');
+  return ALIAS[k]||b.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/_/g,' ').trim()}
+/* a glyph counts only if it is real: not .notdef (the boxed-X), and it has an outline unless it is a space */
+function has(kf,cp){try{const g=kf.glyphForCodePoint(cp);if(!g||g.id===0)return false;
+  return /\s/.test(String.fromCodePoint(cp))||(g.path&&g.path.commands&&g.path.commands.length>0)}catch{return false}}
+const urange=a=>a.map(c=>'U+'+c.toString(16).toUpperCase()).join(',');
+async function addFace(css,bytes,bold,italic,range){
+  const ff=new FontFace(css,bytes.slice(0),{weight:bold?'700':'400',style:italic?'italic':'normal',...(range?{unicodeRange:range}:{})});
+  await ff.load();document.fonts.add(ff)}
+const redrawAll=()=>pages.forEach(p=>p.ctx&&drawAnns(p));
+function regFont(pg,f,bold,italic){
+  let n='',d=null,miss=false;
+  try{const o=pg.commonObjs.get(f);n=o.name||'';if(o.data&&!o.missingFile)d=o.data;miss=!!o.missingFile}catch{}
+  const k=cleanName(n)||f;
+  if(!FONTS[k]){const F=FONTS[k]={k,name:k,raw:n,subset:/^[A-Z]{6}\+/.test(n),emb:d,miss,bold,italic,css:'pf'+(fontN++)};loadFont(F)}
+  return k}
+async function loadFont(F){
+  F.loading=true;
+  if(F.emb)try{ /* browser may use the embedded font ONLY for letters it truly contains */
+    const kf=fontkit.create(F.emb),cps=(kf.characterSet||[]).filter(c=>has(kf,c));
+    if(cps.length){await addFace(F.css+'e',F.emb,F.bold,F.italic,urange(cps));F.hasE=true}}catch(e){}
+  refreshFontUI();redrawAll();
+  try{ // look for a web twin (Google Fonts via fontsource)
+    const fam=famOf(F.name),id=fam.toLowerCase().replace(/\s+/g,'-');
+    const r=await fetch(`https://cdn.jsdelivr.net/fontsource/fonts/${id}@latest/latin-${F.bold?700:400}-${F.italic?'italic':'normal'}.woff`);
+    if(r.ok){F.web=new Uint8Array(await r.arrayBuffer());F.webFam=fam;await addFace(F.css+'w',F.web,F.bold,F.italic);F.hasW=true}
+  }catch(e){}
+  F.loading=false;refreshFontUI();redrawAll()}
+/* CSS font stack for canvas / inputs: user font, else embedded + web twin, then the generic family */
+function FF(o){const F=FONTS[o.fk],s=[];
+  if(F){if(F.hasU)s.push(`"${F.css}u"`);else{if(F.hasE)s.push(`"${F.css}e"`);if(F.hasW)s.push(`"${F.css}w"`)}}
+  s.push(FAM[o.fam]);return s.join(',')}
+/* export: first font source that has every character of the text */
+async function pickFont(out,fc,o,text){
+  const F=FONTS[o.fk];if(!F)return null;
+  for(const [tag,bytes] of [['u',F.user],['e',F.emb],['w',F.web]]){
+    if(!bytes)continue;
+    try{const ck=F.k+tag;if(!fc[ck])fc[ck]={kf:fontkit.create(bytes)};const c=fc[ck];
+      if(![...text].every(ch=>/\s/.test(ch)||has(c.kf,ch.codePointAt(0))))continue;
+      return c.pf||(c.pf=await out.embedFont(bytes,{subset:true}))}catch(e){console.warn('font',F.k,tag,e)}}
+  return null}
+function refreshFontUI(){
+  const box=$('#fl');if(!box)return;const L=Object.values(FONTS);$('#fcount').textContent=L.length;box.innerHTML='';
+  if(!L.length)box.textContent='Open a PDF to list its fonts.';
+  L.forEach(F=>{
+    const use=F.hasU?'your uploaded file':F.hasE&&F.hasW?`embedded font, then ${F.webFam}`:F.hasE?'embedded font':F.hasW?`${F.webFam} (web match)`:F.loading?'searching…':'standard Helvetica/Times/Courier';
+    const d=document.createElement('div');d.className='fr';
+    d.innerHTML='<b></b><small></small><label class="btn">Upload .ttf / .otf<input type="file" accept=".ttf,.otf,.woff" hidden></label>';
+    d.children[0].textContent=F.name;
+    d.children[1].textContent=`${F.emb?(F.subset?'embedded subset':'embedded'):'not embedded'}${F.bold?' · bold':''}${F.italic?' · italic':''} · using: ${use}`;
+    d.querySelector('input').onchange=async e=>{const f=e.target.files[0];if(!f)return;
+      try{F.user=new Uint8Array(await f.arrayBuffer());fontkit.create(F.user);await addFace(F.css+'u',F.user,F.bold,F.italic);F.hasU=true;toast('Now using your font for '+F.name)}
+      catch(err){F.user=null;toast('That font file could not be read')}
+      refreshFontUI();redrawAll()};
+    box.appendChild(d)})}
+$('#fontsBtn').onclick=()=>{const f=$('#fp');f.hidden=!f.hidden;refreshFontUI()};
 const FAM={sans:'Helvetica,Arial,sans-serif',serif:'"Times New Roman",Times,serif',mono:'"Courier New",Courier,monospace'};
 
 /* group pdf.js text items into editable runs, remembering font style */
@@ -218,9 +289,11 @@ async function buildRuns(p,pg){
     const fam=(tc.styles[f]||{}).fontFamily||'';
     const mono=/courier|mono|consol/i.test(n)||fam==='monospace';
     const ser=/times|georgia|garamond|palatino|minion|cambria|bookman|roman|serif/i.test(n)&&!/sans/i.test(n)||fam==='serif'&&!/sans|arial|helvet|calibri|verdana|tahoma/i.test(n);
-    return{sym:/wingding|webding|dingbat|symbol/i.test(n),bold:/bold|black|heavy|semibold|demi/i.test(n),italic:/italic|oblique/i.test(n),fam:mono?'mono':ser?'serif':'sans'};
+    const bold=/bold|black|heavy|semibold|demi/i.test(n),italic=/italic|oblique/i.test(n);
+    return{sym:/wingding|webding|dingbat|symbol/i.test(n),bold,italic,fam:mono?'mono':ser?'serif':'sans',fk:regFont(pg,f,bold,italic)};
   })());
   for(const it of tc.items){
+    it.str=clean(it.str||'');
     if(!it.str||!it.str.trim())continue; /* pdf.js inserts fake whitespace items that span whole cell gaps — ignore them */
     const t=pdfjsLib.Util.transform(vp.transform,it.transform);
     if(Math.abs(t[1])>.01)continue;
@@ -231,7 +304,7 @@ async function buildRuns(p,pg){
       cur.str+=it.str;cur.w=x+w-cur.x;
     }else{cur={id:p.src+':'+runs.length,str:it.str,x,y,w,size,font:it.fontName};runs.push(cur)}
   }
-  const all=runs.filter(r=>r.str.trim()).map(r=>({...r,v:r.str.replace(/\s+$/,''),...meta(r.font),cell:cellOf(p,r)}));
+  const all=runs.filter(r=>r.str.trim()).map(r=>({...r,v:r.str.replace(/\s+$/,'').replace(/ {2,}/g,' '),...meta(r.font),cell:cellOf(p,r)}));
   const out=all.filter((r,i)=>!(r.sym||(r.v.length===1&&/[nlquvü§]/.test(r.v)&&all[i+1]&&all[i+1].font!==r.font)));
   p.paras=buildParas(p,out);
   return out;
@@ -264,7 +337,7 @@ function buildParas(p,segs){
     const ls=P.lines,f=ls[0].seg;
     return{id:'P'+p.src+':'+i,lines:ls,x:P.x,y:ls[0].y,size:P.size,
       lh:ls.length>1?(ls[ls.length-1].y-ls[0].y)/(ls.length-1):P.size*1.2,
-      w:Math.max(...ls.map(l=>l.w)),v:ls.map(l=>l.str).join(' '),fam:f.fam,bold:f.bold,italic:f.italic,
+      w:Math.max(...ls.map(l=>l.w)),v:ls.map(l=>l.str).join(' '),fam:f.fam,fk:f.fk,bold:f.bold,italic:f.italic,
       top:ls[0].y-P.size*.95,hh:(ls[ls.length-1].y-ls[0].y)+P.size*1.25};
   });
 }
@@ -274,7 +347,7 @@ function hitPara(p,x,y){
   return null;
 }
 const mctx=document.createElement('canvas').getContext('2d');
-function measure(fam,b,i,t,size){mctx.font=`${i?'italic ':''}${b?'bold ':''}${size}px ${FAM[fam]}`;return mctx.measureText(t).width}
+function measure(fam,b,i,t,size){mctx.font=`${i?'italic ':''}${b?'bold ':''}${size}px ${fam in FAM?FAM[fam]:fam}`;return mctx.measureText(t).width}
 function wrapText(text,maxW,meas){
   const out=[];
   for(const para of text.split('\n')){let line='';
@@ -282,19 +355,19 @@ function wrapText(text,maxW,meas){
     out.push(line)}
   return out;
 }
-const paraLines=a=>wrapText(a.v,a.wp,t=>measure(a.fam,a.bold,a.italic,t,a.s));
+const paraLines=a=>wrapText(a.v,a.wp,t=>measure(FF(a),a.bold,a.italic,t,a.s));
 function paraBox(p,r){
   const k=BASE*zoom,prev=p.anns.find(a=>a.t==='para'&&a.id===r.id);
   const box=clampBox(p,{x0:r.x-1,x1:r.x+r.w+1,y0:r.top,y1:r.top+r.hh});
   const s=sample(p,box),col=prev?prev.c:s.c,bg=prev?prev.bg:s.bg;
-  const orig=r.lines.reduce((t,l)=>t+l.w,0),mine=r.lines.reduce((t,l)=>t+measure(r.fam,r.bold,r.italic,l.str,r.size),0)||1;
+  const orig=r.lines.reduce((t,l)=>t+l.w,0),mine=r.lines.reduce((t,l)=>t+measure(FF(r),r.bold,r.italic,l.str,r.size),0)||1;
   const fit=Math.max(.82,Math.min(1,orig/mine));
   const ta=document.createElement('textarea');ta.className='tin';ta.value=prev?prev.v:r.v;
-  ta.style.cssText=`left:${r.x*k-3}px;top:${r.top*k-2}px;width:${r.w*k+12}px;height:${Math.max(r.hh,r.lh*3)*k+6}px;font:${r.italic?'italic ':''}${r.bold?'bold ':''}${r.size*k}px/${r.lh*k}px ${FAM[r.fam]};color:${col};background:${bg};padding:2px;resize:none;overflow:auto`;
+  ta.style.cssText=`left:${r.x*k-3}px;top:${r.top*k-2}px;width:${r.w*k+12}px;height:${Math.max(r.hh,r.lh*3)*k+6}px;font:${r.italic?'italic ':''}${r.bold?'bold ':''}${r.size*k}px/${r.lh*k}px ${FF(r)};color:${col};background:${bg};padding:2px;resize:none;overflow:auto`;
   p.sec.querySelector('.stage').appendChild(ta);ta.focus();let done=false;
-  const fin=ok=>{if(done)return;done=true;const v=ta.value;ta.remove();if(!ok)return;
+  const fin=ok=>{if(done)return;done=true;const v=clean(ta.value);ta.remove();if(!ok)return;
     if(prev)p.anns.splice(p.anns.indexOf(prev),1);
-    if(v!==r.v)push(p,{t:'para',id:r.id,xp:r.x,yp:r.y,lh:r.lh,wp:r.w+2,bxp:box.x0,byp:box.y0,bwp:box.x1-box.x0,bhp:box.y1-box.y0,bg,c:col,s:r.size*fit,fam:r.fam,bold:r.bold,italic:r.italic,v});
+    if(v!==r.v)push(p,{t:'para',id:r.id,xp:r.x,yp:r.y,lh:r.lh,wp:r.w+2,bxp:box.x0,byp:box.y0,bwp:box.x1-box.x0,bhp:box.y1-box.y0,bg,c:col,s:r.size*fit,fam:r.fam,fk:r.fk,bold:r.bold,italic:r.italic,v});
     else drawAnns(p)};
   ta.onkeydown=e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey))fin(true);if(e.key==='Escape')fin(false);e.stopPropagation()};
   ta.onblur=()=>fin(true);
@@ -325,22 +398,22 @@ function editBox(p,r){
   /* cover only the old glyphs, and never paint over table borders */
   const box=clampBox(p,{x0:r.x-.8,x1:r.x+r.w+.8,y0:r.y-r.size*.92,y1:r.y+r.size*.28});
   const s=sample(p,box),col=prev?prev.c:s.c,bg=prev?prev.bg:s.bg;
-  const fit0=Math.max(.82,Math.min(1,r.w/measure(r.fam,r.bold,r.italic,r.v,r.size)));
+  const fit0=Math.max(.82,Math.min(1,r.w/measure(FF(r),r.bold,r.italic,r.v,r.size)));
   /* keep the original alignment inside the cell: left / centre / right */
   let al='left';
   if(r.cell){const pl=r.x-r.cell.l,pr=r.cell.r-(r.x+r.w);
     if(Math.abs(pl-pr)<=Math.max(2,(r.cell.r-r.cell.l)*.1))al='center';else if(pr<pl)al='right'}
   const inp=document.createElement('input');inp.className='tin';inp.value=prev?prev.v:r.v;
   const L=r.cell?r.cell.l*k+1:r.x*k-2,Wd=r.cell?(r.cell.r-r.cell.l)*k-2:Math.max(r.w*k+30,120);
-  inp.style.cssText=`left:${L}px;top:${box.y0*k-1}px;width:${Wd}px;height:${(box.y1-box.y0)*k+2}px;text-align:${al};font:${r.italic?'italic ':''}${r.bold?'bold ':''}${r.size*k}px ${FAM[r.fam]};color:${col};background:${bg};padding:0 2px;min-width:0`;
+  inp.style.cssText=`left:${L}px;top:${box.y0*k-1}px;width:${Wd}px;height:${(box.y1-box.y0)*k+2}px;text-align:${al};font:${r.italic?'italic ':''}${r.bold?'bold ':''}${r.size*k}px ${FF(r)};color:${col};background:${bg};padding:0 2px;min-width:0`;
   p.sec.querySelector('.stage').appendChild(inp);inp.focus();inp.select();let done=false;
-  const fin=ok=>{if(done)return;done=true;const v=inp.value;inp.remove();if(!ok)return;
+  const fin=ok=>{if(done)return;done=true;const v=clean(inp.value);inp.remove();if(!ok)return;
     if(prev)p.anns.splice(p.anns.indexOf(prev),1);
     if(v!==r.v){
       let sz=r.size*fit0;
-      if(r.cell){const inner=r.cell.r-r.cell.l-3,tw=measure(r.fam,r.bold,r.italic,v,sz);if(tw>inner)sz=Math.max(r.size*.6,sz*inner/tw)}
+      if(r.cell){const inner=r.cell.r-r.cell.l-3,tw=measure(FF(r),r.bold,r.italic,v,sz);if(tw>inner)sz=Math.max(r.size*.6,sz*inner/tw)}
       const ax=al==='left'?r.x:al==='center'?r.x+r.w/2:r.x+r.w;
-      push(p,{t:'edit',id:r.id,ax:ax/p.w,al,y:r.y/p.h,bx:box.x0/p.w,by:box.y0/p.h,bw:(box.x1-box.x0)/p.w,bh:(box.y1-box.y0)/p.h,bg,c:col,s:sz,fam:r.fam,bold:r.bold,italic:r.italic,v});
+      push(p,{t:'edit',id:r.id,ax:ax/p.w,al,y:r.y/p.h,bx:box.x0/p.w,by:box.y0/p.h,bw:(box.x1-box.x0)/p.w,bh:(box.y1-box.y0)/p.h,bg,c:col,s:sz,fam:r.fam,fk:r.fk,bold:r.bold,italic:r.italic,v});
     }else drawAnns(p)};
   inp.onkeydown=e=>{
     if(e.key==='Enter')fin(true);if(e.key==='Escape')fin(false);
@@ -371,12 +444,12 @@ function drawAnns(p,live){
     }else if(a.t==='edit'){
       c.fillStyle=a.bg;c.fillRect(a.bx*W,a.by*H,a.bw*W,a.bh*H);
       c.fillStyle=a.c;c.textBaseline='alphabetic';
-      c.font=`${a.italic?'italic ':''}${a.bold?'bold ':''}${a.s*BASE*zoom}px ${FAM[a.fam]}`;
+      c.font=`${a.italic?'italic ':''}${a.bold?'bold ':''}${a.s*BASE*zoom}px ${FF(a)}`;
       const tw=c.measureText(a.v).width;
       c.fillText(a.v,a.al==='center'?a.ax*W-tw/2:a.al==='right'?a.ax*W-tw:a.ax*W,a.y*H);
     }else if(a.t==='para'){
       const k=BASE*zoom;c.fillStyle=a.bg;c.fillRect(a.bxp*k,a.byp*k,a.bwp*k,a.bhp*k);
-      c.fillStyle=a.c;c.textBaseline='alphabetic';c.font=`${a.italic?'italic ':''}${a.bold?'bold ':''}${a.s*k}px ${FAM[a.fam]}`;
+      c.fillStyle=a.c;c.textBaseline='alphabetic';c.font=`${a.italic?'italic ':''}${a.bold?'bold ':''}${a.s*k}px ${FF(a)}`;
       paraLines(a).forEach((t,i)=>c.fillText(t,a.xp*k,(a.yp+i*a.lh)*k));
     }
     c.restore();
@@ -450,7 +523,7 @@ $('#save').onclick=async()=>{
   try{
     const {PDFDocument,StandardFonts,rgb}=PDFLib;
     const src=await PDFDocument.load(srcBytes,{ignoreEncryption:true});
-    const out=await PDFDocument.create();
+    const out=await PDFDocument.create();out.registerFontkit(fontkit);
     const font=await out.embedFont(StandardFonts.Helvetica),fc={};
     for(const p of pages){
       let pg;
@@ -468,13 +541,13 @@ $('#save').onclick=async()=>{
         }else if(a.t==='para'){
           pg.drawRectangle({x:a.bxp,y:H-(a.byp+a.bhp),width:a.bwp,height:a.bhp,color:col(a.bg)});
           const fn=({mono:['Courier','CourierBold','CourierOblique','CourierBoldOblique'],serif:['TimesRoman','TimesRomanBold','TimesRomanItalic','TimesRomanBoldItalic'],sans:['Helvetica','HelveticaBold','HelveticaOblique','HelveticaBoldOblique']})[a.fam][(a.bold?1:0)+(a.italic?2:0)];
-          const f=fc[fn]||(fc[fn]=await out.embedFont(StandardFonts[fn]));
+          const f=(await pickFont(out,fc,a,a.v))||fc[fn]||(fc[fn]=await out.embedFont(StandardFonts[fn]));
           const safe=t=>{try{f.encodeText(t);return t}catch{return t.replace(/[^\x20-\xFF]/g,'?')}};
           wrapText(safe(a.v),a.wp,t=>f.widthOfTextAtSize(t,a.s)).forEach((t,i)=>{if(t)pg.drawText(t,{x:a.xp,y:H-(a.yp+i*a.lh),size:a.s,font:f,color:col(a.c)})});
         }else if(a.t==='edit'){
           pg.drawRectangle({x:a.bx*W,y:H-(a.by+a.bh)*H,width:a.bw*W,height:a.bh*H,color:col(a.bg)});
           const fn=({mono:['Courier','CourierBold','CourierOblique','CourierBoldOblique'],serif:['TimesRoman','TimesRomanBold','TimesRomanItalic','TimesRomanBoldItalic'],sans:['Helvetica','HelveticaBold','HelveticaOblique','HelveticaBoldOblique']})[a.fam][(a.bold?1:0)+(a.italic?2:0)];
-          const f=fc[fn]||(fc[fn]=await out.embedFont(StandardFonts[fn]));
+          const f=(await pickFont(out,fc,a,a.v))||fc[fn]||(fc[fn]=await out.embedFont(StandardFonts[fn]));
           let v=a.v;try{f.encodeText(v)}catch{v=v.replace(/[^\x20-\xFF]/g,'?')}
           if(v){const tw=f.widthOfTextAtSize(v,a.s);pg.drawText(v,{x:a.al==='center'?a.ax*W-tw/2:a.al==='right'?a.ax*W-tw:a.ax*W,y:H-a.y*H,size:a.s,font:f,color:col(a.c)})}
         }else if(a.t==='img'){
