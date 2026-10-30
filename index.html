@@ -45,6 +45,18 @@ textarea.tin{display:block}.tool-draw .ov,.tool-rect .ov,.tool-white .ov,.tool-h
 #fp{position:fixed;right:12px;top:56px;width:min(400px,92vw);max-height:70vh;overflow:auto;background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:12px;z-index:20;box-shadow:0 10px 30px #0004}
 #fp .btn{border-color:var(--line);font-size:12px;padding:3px 8px;align-self:flex-start}
 .fr{border-top:1px solid var(--line);padding:8px 0;display:flex;flex-direction:column;gap:3px}.fr small{color:var(--mute)}
+#support{max-width:640px;margin:26px auto 10px;background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:20px;text-align:center;box-shadow:0 6px 20px #0001}
+#support h3{margin:0 0 6px;font:600 22px var(--serif)}#support p{margin:0 0 14px;color:var(--mute)}
+#support .sg{display:flex;flex-wrap:wrap;gap:20px;justify-content:center;align-items:center}
+#support #qr{background:#fff;padding:10px;border:1px solid var(--line);border-radius:12px;min-width:160px;min-height:160px}
+#support .sr{display:flex;flex-direction:column;gap:10px;align-items:center}
+#support .amts{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
+#support .mini{color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 12px}
+#support .mini:hover{background:var(--line)}#support .mini.on{background:var(--acc);border-color:var(--acc);color:#fff}
+#support input.in{width:170px;text-align:center;padding:7px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+#support .upi{display:flex;gap:8px;align-items:center}#support code{background:var(--bg);padding:5px 9px;border-radius:6px}
+#support a.pay{background:var(--acc);color:#fff;text-decoration:none;padding:10px 18px;border-radius:10px;font-weight:600}
+#support .note{font-size:12px;color:var(--mute);margin-top:12px}
 #toast{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--bar);color:var(--bart);padding:8px 16px;border-radius:99px;opacity:0;transition:.25s;pointer-events:none}
 #toast.show{opacity:1}
 .hint{font-size:12px;color:var(--mute);text-align:center;margin-top:18px}
@@ -86,18 +98,30 @@ textarea.tin{display:block}.tool-draw .ov,.tool-rect .ov,.tool-white .ov,.tool-h
     <label class="btn" for="f">Choose a PDF</label>
     <div class="hint">…or drag one onto this window</div>
   </div>
+  <section id="support">
+    <h3>❤️ Support PDFEdit</h3>
+    <p>Made by <b>Gagandeep Singh</b> — if this saved you time, chip in for hosting &amp; coffee.</p>
+    <div class="sg"><div id="qr"></div><div class="sr">
+      <div class="amts"><button class="mini" data-a="49">₹49</button><button class="mini" data-a="99">₹99</button><button class="mini" data-a="199">₹199</button><button class="mini" data-a="499">₹499</button></div>
+      <input class="in" id="ca" type="number" min="1" placeholder="Custom amount ₹">
+      <div class="upi"><code>8463083061@sbi</code><button class="mini" id="cp">Copy</button></div>
+      <a class="pay" id="pay" href="#">📱 Pay via UPI app</a></div></div>
+    <div class="note">On a phone tap “Pay via UPI app”. On a computer scan the QR with any UPI app.</div>
+  </section>
 </main>
 <div id="fp" hidden><b>Fonts in this PDF</b>
   <p class="hint" style="text-align:left;margin:4px 0 6px">Edited text uses the PDF’s own embedded font when it has the letters, else a matching web font. Upload the real .ttf/.otf to be exact.</p><div id="fl"></div></div>
 <div id="toast"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 const $=s=>document.querySelector(s), main=$('#main');
 let srcBytes=null, pdfDoc=null, pages=[], tool='edit', zoom=1, undoStack=[];
+const supportEl=document.getElementById('support');
 const BASE=1.3; // css px per pt at 100%
 
 function toast(m){const t=$('#toast');t.textContent=m;t.classList.add('show');clearTimeout(toast.h);toast.h=setTimeout(()=>t.classList.remove('show'),2600)}
@@ -137,7 +161,7 @@ async function layout(){
       layout()};
     setupCanvas(p);
   });
-  const h=document.createElement('div');h.className='hint';h.textContent='Tip: Ctrl/Cmd+Z undoes your last edit.';main.appendChild(h);
+  const h=document.createElement('div');h.className='hint';h.textContent='Tip: Ctrl/Cmd+Z undoes your last edit.';main.appendChild(h);main.appendChild(supportEl);
   for(const p of pages) await renderBase(p);
 }
 
@@ -563,6 +587,20 @@ $('#save').onclick=async()=>{
   }catch(e){console.error(e);toast('Couldn’t save: '+(e.message||e))}
   btn.disabled=false;btn.textContent='Save PDF';
 };
+
+/* ---- Support box (UPI) ---- */
+(function(){
+  const UPI='8463083061@sbi',NAME='Gagandeep Singh',NOTE='Support PDFEdit',S=supportEl;let amt=0;
+  const q=x=>S.querySelector(x),link=a=>`upi://pay?pa=${UPI}&pn=${encodeURIComponent(NAME)}&cu=INR&tn=${encodeURIComponent(NOTE)}`+(a>0?`&am=${a}`:'');
+  function render(){const u=link(amt);q('#pay').href=u;const b=q('#qr');b.innerHTML='';
+    try{new QRCode(b,{text:u,width:160,height:160,correctLevel:QRCode.CorrectLevel.M})}catch(e){b.textContent='Use the UPI ID'}}
+  const amts=S.querySelectorAll('.amts .mini');
+  amts.forEach(b=>b.onclick=()=>{amt=+b.dataset.a;q('#ca').value='';amts.forEach(x=>x.classList.toggle('on',x===b));render()});
+  q('#ca').oninput=e=>{amt=Math.max(0,+e.target.value||0);amts.forEach(x=>x.classList.remove('on'));render()};
+  q('#cp').onclick=async()=>{try{await navigator.clipboard.writeText(UPI)}catch(e){}
+    q('#cp').textContent='Copied ✓';setTimeout(()=>q('#cp').textContent='Copy',1800)};
+  render();
+})();
 </script>
 </body>
 </html>
